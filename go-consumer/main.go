@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -14,25 +15,45 @@ import (
 
 var KAFKA_HOST = os.Getenv("KAFKA_HOST")
 var rabbitQueueName string
+var MAX_SIZE_LIST = 200
 
 type Message struct {
 	Time     time.Time `json:"time"`
 	Value    string    `json:"value"`
 	DeviceID int       `json:"deviceID"`
 }
+type MessageType struct {
+	Message    Message
+	brokerName string
+}
+type SaferMessageList struct {
+	consumerList []MessageType
+	mu           sync.Mutex
+}
 
-func printValue(value *Message, brokerName string) {
+func printValue(value *Message, brokerName string, list *SaferMessageList) error {
+	list.mu.Lock()
+	if len(list.consumerList) == MAX_SIZE_LIST {
+		list.mu.Unlock()
+		return fmt.Errorf("Max size completed")
+	}
+	list.consumerList = append(list.consumerList, MessageType{
+		Message:    *value,
+		brokerName: brokerName,
+	})
+	list.mu.Unlock()
 	fmt.Println()
-	fmt.Println("------------" + brokerName + "------------")
+	fmt.Println("------------" + brokerName + "------------ \t count: " + strconv.Itoa(len(list.consumerList)))
 	fmt.Println("MESSAGE RECIEVED:")
 	fmt.Printf("timestamp: %s  - actual time:%s\n", value.Time, time.Now())
 	fmt.Printf("Difference in ms: %d \n", time.Now().Sub(value.Time).Milliseconds())
 	fmt.Printf("DeviceID: %d - value: %s\n", value.DeviceID, value.Value)
 	fmt.Println("------------" + brokerName + "------------")
 	fmt.Println()
+	return nil
 }
 
-func kafkaConsume(reader *kafka.Reader) {
+func kafkaConsume(reader *kafka.Reader, list *SaferMessageList, wg *sync.WaitGroup) {
 	for {
 		ctx := context.Background()
 		msg, err := reader.ReadMessage(ctx)
@@ -42,7 +63,11 @@ func kafkaConsume(reader *kafka.Reader) {
 		}
 		var value Message
 		json.Unmarshal(msg.Value, &value)
-		printValue(&value, "KAFKA")
+		err = printValue(&value, "KAFKA", list)
+		if err != nil {
+			wg.Done()
+			return
+		}
 	}
 }
 func connectKafka() *kafka.Reader {
@@ -52,6 +77,7 @@ func connectKafka() *kafka.Reader {
 		Topic:   "test-topic",
 		GroupID: "my-group",
 	})
+	fmt.Println("Kafka connected successfully")
 	return reader
 }
 func connectRabbit(tries int) (*amqp.Channel, error) {
@@ -110,7 +136,7 @@ func connectRabbit(tries int) (*amqp.Channel, error) {
 	return ch, nil
 
 }
-func rabbitConsume(ch *amqp.Channel) {
+func rabbitConsume(ch *amqp.Channel, list *SaferMessageList, wg *sync.WaitGroup) {
 	msgs, err := ch.Consume(
 		rabbitQueueName,
 		"",
@@ -124,26 +150,55 @@ func rabbitConsume(ch *amqp.Channel) {
 		fmt.Println(err.Error())
 		panic("Error consuming queue")
 	}
-	fmt.Println("RabbitMQ connected")
+	fmt.Println("RabbitMQ connected successfully")
 	var forever chan struct{}
 	go func() {
 		for message := range msgs {
 			var value Message
 			json.Unmarshal(message.Body, &value)
-			printValue(&value, "RABBITMQ")
+			err := printValue(&value, "RABBITMQ", list)
+			if err != nil {
+				wg.Done()
+				return
+			}
 		}
 	}()
 	<-forever
 }
-func main() {
-	kafkaReader := connectKafka()
-	rabbitReader, err := connectRabbit(0)
-	if err != nil {
-		panic(err)
+
+func consume(kafkaReader *kafka.Reader, rabbitReader *amqp.Channel) []MessageType {
+	saferList := &SaferMessageList{
+		consumerList: []MessageType{},
 	}
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go kafkaConsume(kafkaReader)
-	go rabbitConsume(rabbitReader)
+	wg.Add(2)
+	go kafkaConsume(kafkaReader, saferList, &wg)
+	go rabbitConsume(rabbitReader, saferList, &wg)
 	wg.Wait()
+	return saferList.consumerList
+}
+func main() {
+
+	for test := 0; test < 20; test++ {
+		kafkaReader := connectKafka()
+		rabbitReader, err := connectRabbit(0)
+		if err != nil {
+			panic(err)
+		}
+		list := consume(kafkaReader, rabbitReader)
+		countRabbit := 0
+		countKafka := 0
+		for i := 0; i < MAX_SIZE_LIST; i++ {
+			if list[i].brokerName == "KAFKA" {
+				countKafka++
+			} else {
+				countRabbit++
+			}
+		}
+		fmt.Println("FINAL COUNT IN " + strconv.Itoa(MAX_SIZE_LIST) + " MESSAGES CONSUMED")
+		fmt.Println("KAFKA MESSAGES:", countKafka)
+		fmt.Println("RABBITMQ MESSAGES:", countRabbit)
+		fmt.Println("TRYING AGAIN AFTER 15 SECONDS")
+		time.Sleep(15 * time.Second)
+	}
 }
