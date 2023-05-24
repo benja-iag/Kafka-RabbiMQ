@@ -1,13 +1,14 @@
 version: "3"
 services:
-  consumer: # makeit with nodejs
-    build: ./consumer
+  go-consumer:
+    build: ./go-consumer
     ports:
       - "3000:3000"
     environment:
       - KAFKA_HOST=kafka:9092
+      - RABBITMQ_HOST=rabbitmq:5672
     volumes:
-      - ./consumer:/app/
+      - ./go-consumer:/app
     depends_on:
       - kafka
   producer:
@@ -15,7 +16,8 @@ services:
     ports:
       - "3001:3001"
     environment:
-      - KAFKA_BROKER=kafka:9092
+      - KAFKA_HOST=kafka:9092
+      - RABBITMQ_HOST=rabbitmq:5672
     volumes:
       - ./go-producer:/app
     depends_on:
@@ -33,5 +35,14 @@ services:
     environment:
       - KAFKA_CFG_ZOOKEEPER_CONNECT=zookeeper:2181
       - ALLOW_PLAINTEXT_LISTENER=yes
+
     depends_on:
       - zookeeper
+  rabbitmq:
+    image: bitnami/rabbitmq:3.9.7
+    environment:
+      - RABBITMQ_USERNAME=username
+      - RABBITMQ_PASSWORD=password
+    ports:
+      - "15672:15672"
+      - "5672:5672"
